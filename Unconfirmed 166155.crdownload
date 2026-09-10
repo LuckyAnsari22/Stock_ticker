@@ -1,0 +1,166 @@
+import serial
+import time
+import json
+import random
+import argparse
+import threading
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from collections import deque
+
+class QuantDashboard:
+    def __init__(self, use_arduino=False, port="COM3", mode="sim", symbol="^NSEI"):
+        self.use_arduino = use_arduino
+        self.mode = mode
+        self.symbol = symbol
+        self.ser = None
+        
+        if self.use_arduino:
+            try:
+                self.ser = serial.Serial(port, 9600, timeout=1)
+                print(f"Connected to Arduino on {port}")
+            except Exception as e:
+                print(f"Failed to connect to Arduino: {e}. Running in simulation only.")
+                self.use_arduino = False
+
+        # Data Buffers for plotting
+        self.max_len = 50
+        self.t_data = deque(maxlen=self.max_len)
+        self.price_data = deque(maxlen=self.max_len)
+        self.ema9_data = deque(maxlen=self.max_len)
+        self.ema21_data = deque(maxlen=self.max_len)
+        self.bb_upper = deque(maxlen=self.max_len)
+        self.bb_lower = deque(maxlen=self.max_len)
+        self.rsi_data = deque(maxlen=self.max_len)
+        self.macd_data = deque(maxlen=self.max_len)
+        self.signal_history = []
+        
+        self.tick = 0
+        self.cur_price = 15000.0
+
+    def sim_next_price(self):
+        """Simulate geometric brownian motion"""
+        noise = random.uniform(-0.005, 0.005)
+        self.cur_price = self.cur_price * (1 + noise)
+        return self.cur_price
+
+    def read_from_arduino(self):
+        """Send simulated price to Arduino and read JSON indicators back"""
+        price = self.sim_next_price()
+        try:
+            # Send price to Arduino
+            self.ser.write(f"{price:.2f}\n".encode())
+            
+            # Read JSON response
+            line = self.ser.readline().decode().strip()
+            if line.startswith("{") and line.endswith("}"):
+                data = json.loads(line)
+                return data
+        except Exception:
+            pass
+        return None
+
+    def sim_embedded_logic(self):
+        """Pure software simulation if Arduino is not connected"""
+        price = self.sim_next_price()
+        
+        # Super simple simulated EMA for visual testing
+        ema9 = price * 0.99
+        ema21 = price * 1.01
+        
+        # Update buffers
+        self.price_data.append(price)
+        self.ema9_data.append(ema9)
+        self.ema21_data.append(ema21)
+        self.bb_upper.append(price * 1.02)
+        self.bb_lower.append(price * 0.98)
+        self.rsi_data.append(random.uniform(20, 80))
+        self.macd_data.append(random.uniform(-50, 50))
+        
+        sig = random.choice(["HOLD", "HOLD", "BUY", "SELL"])
+        if len(self.signal_history) > 10:
+            self.signal_history.pop(0)
+        self.signal_history.append(f"Tick {self.tick}: {sig} @ ₹{price:.2f}")
+
+    def update_plot(self, frame, ax1, ax2, ax3, ax4):
+        self.tick += 1
+        
+        if self.use_arduino:
+            data = self.read_from_arduino()
+            if data:
+                # Assuming JSON looks like: {"p":15000, "e9":14900, "e21":14800, "bbU": 15100, "bbL": 14900, "rsi": 65, "macd": 20, "sig": "BUY"}
+                self.price_data.append(data.get('p', self.cur_price))
+                self.ema9_data.append(data.get('e9', self.cur_price))
+                self.ema21_data.append(data.get('e21', self.cur_price))
+                self.bb_upper.append(data.get('bbU', self.cur_price))
+                self.bb_lower.append(data.get('bbL', self.cur_price))
+                self.rsi_data.append(data.get('rsi', 50))
+                self.macd_data.append(data.get('macd', 0))
+                sig = data.get('sig', "HOLD")
+                
+                if len(self.signal_history) > 10:
+                    self.signal_history.pop(0)
+                self.signal_history.append(f"Tick {self.tick}: {sig} @ ₹{self.price_data[-1]:.2f}")
+        else:
+            self.sim_embedded_logic()
+            
+        self.t_data.append(self.tick)
+        
+        # 1. Price Panel
+        ax1.clear()
+        ax1.set_title("Price & Bollinger Bands (Layer 1&2)")
+        ax1.plot(self.t_data, self.price_data, label='Price', color='cyan')
+        ax1.plot(self.t_data, self.ema9_data, label='EMA-9', color='orange', linestyle='--')
+        ax1.plot(self.t_data, self.ema21_data, label='EMA-21', color='purple', linestyle=':')
+        ax1.fill_between(self.t_data, self.bb_lower, self.bb_upper, color='gray', alpha=0.2, label='Bollinger')
+        ax1.legend(loc='upper left', fontsize=8)
+        
+        # 2. RSI Panel
+        ax2.clear()
+        ax2.set_title("RSI (Momentum)")
+        ax2.plot(self.t_data, self.rsi_data, color='yellow')
+        ax2.axhline(70, color='red', linestyle='--', alpha=0.5)
+        ax2.axhline(30, color='green', linestyle='--', alpha=0.5)
+        ax2.set_ylim(0, 100)
+        
+        # 3. MACD
+        ax3.clear()
+        ax3.set_title("MACD Histogram")
+        colors = ['red' if val < 0 else 'green' for val in self.macd_data]
+        ax3.bar(list(self.t_data), list(self.macd_data), color=colors)
+        
+        # 4. Signals
+        ax4.clear()
+        ax4.axis('off')
+        ax4.set_title("Strategy Signals (From Arduino/Engine)")
+        y_pos = 0.9
+        for text in reversed(self.signal_history):
+            color = 'white'
+            if 'BUY' in text: color = '#00ff88'
+            if 'SELL' in text: color = '#ff4444'
+            ax4.text(0, y_pos, text, color=color, fontsize=10, fontfamily='monospace')
+            y_pos -= 0.08
+
+    def run(self):
+        plt.style.use('dark_background')
+        fig = plt.figure(figsize=(12, 8))
+        
+        ax1 = plt.subplot2grid((4, 2), (0, 0), rowspan=2, colspan=1)
+        ax2 = plt.subplot2grid((4, 2), (2, 0), rowspan=1, colspan=1)
+        ax3 = plt.subplot2grid((4, 2), (3, 0), rowspan=1, colspan=1)
+        ax4 = plt.subplot2grid((4, 2), (0, 1), rowspan=4, colspan=1)
+        
+        ani = animation.FuncAnimation(fig, self.update_plot, fargs=(ax1, ax2, ax3, ax4), interval=1000)
+        plt.tight_layout()
+        plt.show()
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=['sim', 'live'], default='sim')
+    parser.add_argument("--symbol", default="^NSEI")
+    parser.add_argument("--port", default="COM3")
+    parser.add_argument("--no-arduino", action='store_true', default=False)
+    args = parser.parse_args()
+    
+    dashboard = QuantDashboard(use_arduino=not args.no_arduino, port=args.port, mode=args.mode, symbol=args.symbol)
+    dashboard.run()
